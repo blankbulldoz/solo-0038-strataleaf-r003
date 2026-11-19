@@ -61,6 +61,10 @@
       "command": "python3 -m examples.workflows patch"
     },
     {
+      "workflow_id": "transform",
+      "command": "python3 -m examples.workflows transform"
+    },
+    {
       "workflow_id": "inspect",
       "command": "python3 -m examples.workflows inspect"
     },

@@ -1,6 +1,7 @@
 import json
 import sys
 import tempfile
+import threading
 from pathlib import Path
 from strataleaf import Database, Archives, Conflict, InvalidDocument, InvalidCursor, ReadOnly, SnapshotTooOld, ReplicationError
 
@@ -132,6 +133,79 @@ def run(flow):
                 result = db.patch("segments", "seg_00", {"code": None, "detail": {"block": 4}}, expected=first)
                 output = {"patch": result.__dict__, "document": db.get("segments", "seg_00").document,
                           "stale": rejected(lambda: db.patch("segments", "seg_00", {"sequence": 8}, expected=first), Conflict)}
+            elif flow == "transform":
+                db.catalog.create("counters", {"fields": {"value": "integer", "tags": "array", "active": "boolean", "detail": "object"},
+                                                "required": ["value"]})
+                seeded = db.batch().put("counters", "hit_a", {"value": 10, "tags": ["x", 1], "active": True,
+                                                               "detail": {"nested": 5}}).commit()
+                revision = seeded.revision
+                result = db.batch("atomic_transform").transform("counters", "hit_a", [
+                    {"op": "increment", "field": "value", "amount": 5},
+                    {"op": "increment", "field": "value", "amount": -2},
+                    {"op": "increment", "field": "detail.nested", "amount": 10},
+                    {"op": "append_unique", "field": "tags", "value": "x"},
+                    {"op": "append_unique", "field": "tags", "value": "y"},
+                    {"op": "append_unique", "field": "tags", "value": 1},
+                    {"op": "remove_member", "field": "tags", "value": 1},
+                ], expected=revision).commit()
+                replay = db.batch("atomic_transform").transform("counters", "hit_a", [
+                    {"op": "increment", "field": "value", "amount": 5},
+                    {"op": "increment", "field": "value", "amount": -2},
+                    {"op": "increment", "field": "detail.nested", "amount": 10},
+                    {"op": "append_unique", "field": "tags", "value": "x"},
+                    {"op": "append_unique", "field": "tags", "value": "y"},
+                    {"op": "append_unique", "field": "tags", "value": 1},
+                    {"op": "remove_member", "field": "tags", "value": 1},
+                ], expected=revision).commit()
+                final = db.get("counters", "hit_a").document
+                type_rejections = [
+                    rejected(lambda: db.transform("counters", "hit_a", [{"op": "increment", "field": "active", "amount": 1}]), InvalidDocument),
+                    rejected(lambda: db.transform("counters", "hit_a", [{"op": "increment", "field": "value", "amount": True}]), InvalidDocument),
+                    rejected(lambda: db.transform("counters", "hit_a", [{"op": "increment", "field": "absent", "amount": 1}]), InvalidDocument),
+                    rejected(lambda: db.transform("counters", "hit_a", [{"op": "append_unique", "field": "value", "value": "z"}]), InvalidDocument),
+                ]
+                rolled_back = rejected(lambda: db.batch().transform("counters", "hit_a", [
+                    {"op": "increment", "field": "value", "amount": 1},
+                    {"op": "append_unique", "field": "value", "value": "z"},
+                ]).commit(), InvalidDocument)
+                stale = rejected(lambda: db.transform("counters", "hit_a", [
+                    {"op": "increment", "field": "value", "amount": 1}], expected=revision), Conflict)
+                db.batch().put("counters", "hit_b", {"value": 1, "tags": []}).commit()
+                rival_errors = []
+                def rival(tag):
+                    for attempt in range(50):
+                        record = db.get("counters", "hit_b")
+                        try:
+                            db.transform("counters", "hit_b", [
+                                {"op": "increment", "field": "value", "amount": 1},
+                                {"op": "append_unique", "field": "tags", "value": tag + str(attempt)},
+                            ], expected=record.revision)
+                            return
+                        except Conflict as exc:
+                            rival_errors.append(str(exc))
+                    raise RuntimeError("rival transform retried too many times")
+                threads = [threading.Thread(target=rival, args=(tag,)) for tag in ("a", "b")]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join()
+                contended = db.get("counters", "hit_b").document
+                feed = [op for commit in db.feed.read(0) for op in commit["operations"] if op.get("kind") == "transform"]
+                output = {"commit": result.__dict__, "replay": replay.__dict__, "final": final,
+                          "type_rejections": type_rejections, "rolled_back": rolled_back, "stale": stale,
+                          "concurrent": {"value": contended["value"], "tags": len(contended["tags"]),
+                                         "conflicts_retried": len(rival_errors)},
+                          "feed_delivers_materialized_document": {"kind": feed[-1]["kind"],
+                                                                  "document": feed[-1]["document"],
+                                                                  "actions": feed[-1]["actions"]}}
+                if final != {"value": 13, "tags": ["x", "y"], "active": True, "detail": {"nested": 15}}:
+                    raise RuntimeError("atomic transform produced an unexpected document")
+                if contended["value"] != 3 or len(contended["tags"]) != 2:
+                    raise RuntimeError("concurrent transforms lost an update")
+                if not replay.replayed:
+                    raise RuntimeError("idempotency replay observation failed")
+                if rival_errors:
+                    print("(transform) concurrent writers retried through", len(rival_errors), "revision conflicts", file=sys.stderr)
             elif flow == "inspect":
                 db.indexes.create("segments", "by_code", "code")
                 output = {"inspection": db.diagnostics.inspect(deep=True), "fingerprint": db.diagnostics.fingerprint(), "checkpoint": db.checkpoint()}

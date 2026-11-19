@@ -5,6 +5,14 @@ from .errors import Conflict, InvalidDocument, NotFound
 from .indexes import refresh_document
 from .mvcc import latest_row
 from .schema import validate_document
+from .transforms import apply_actions, validate_actions
+
+KEEP_EXPIRES = "keep-expires"
+
+
+def operations_fingerprint(operations):
+    """Digest of the requested operations; the keep-expires marker is itself JSON-safe."""
+    return digest(operations)
 
 
 @dataclass(frozen=True)
@@ -47,6 +55,18 @@ class WriteBatch:
         return self._append({"collection": name(collection), "key": checked_key(key), "document": None,
                              "expected": expected, "expires_at": None})
 
+    def transform(self, collection, key, actions, expected=None, expires_at=KEEP_EXPIRES):
+        name(collection)
+        checked_key(key)
+        normalized = validate_actions(actions)
+        if expires_at is not KEEP_EXPIRES and expires_at is not None and (
+                isinstance(expires_at, bool) or not isinstance(expires_at, (int, float))
+                or not math.isfinite(expires_at)):
+            raise InvalidDocument("expires_at must be a finite timestamp, None, or omitted to keep the current one")
+        return self._append({"collection": collection, "key": key, "kind": "transform",
+                             "actions": normalized, "document": None, "expected": expected,
+                             "expires_at": expires_at})
+
     def abort(self):
         if self.state != "open":
             raise Conflict("batch is already " + self.state)
@@ -58,7 +78,7 @@ class WriteBatch:
             raise Conflict("batch is already " + self.state)
         if not self.operations or len(self.operations) > 10000:
             raise InvalidDocument("batch must contain between 1 and 10000 operations")
-        fingerprint = digest(self.operations)
+        fingerprint = operations_fingerprint(self.operations)
         try:
             with self.store.atomic(writable=True) as connection:
                 if self.request_key is not None:
@@ -77,7 +97,15 @@ class WriteBatch:
                     current = old["rev"] if old is not None else 0
                     if op["expected"] is not None and op["expected"] != current:
                         raise Conflict(f"revision conflict for {op['collection']}/{op['key']}: expected {op['expected']}, found {current}")
-                    if op["document"] is not None:
+                    if op.get("kind") == "transform":
+                        if old is None or old["body"] is None:
+                            raise NotFound(f"cannot transform a missing document: {op['collection']}/{op['key']}")
+                        document = apply_actions(loads(old["body"]), op["actions"])
+                        validate_document(document, loads(schema[0]))
+                        op["document"] = document
+                        if op["expires_at"] is KEEP_EXPIRES:
+                            op["expires_at"] = old["expires"]
+                    elif op["document"] is not None:
                         validate_document(op["document"], loads(schema[0]))
                 revision = head + 1
                 for op in self.operations:

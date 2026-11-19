@@ -12,6 +12,7 @@ from .retention import Retention
 from .storage import Storage
 from .transaction import WriteBatch
 from .transfer import Transfer
+from .transforms import transform_document
 
 
 class Database:
@@ -45,6 +46,9 @@ class Database:
 
     def patch(self, collection, key, patch, expected=None):
         return patch_document(self._store, collection, key, patch, expected)
+
+    def transform(self, collection, key, actions, expected=None):
+        return transform_document(self._store, collection, key, actions, expected)
 
     def checkpoint(self):
         return self._store.checkpoint()

@@ -18,6 +18,7 @@
       "到期文档产生显式删除提交",
       "同一历史读版本完成分组和数值计算",
       "读后修改受版本前置条件保护",
+      "动作在单提交边界内物化为最终文档且并发修改互不丢失",
       "物理完整性与逻辑引用一致性可观察",
       "外部文档流验证后整批导入"
     ]
@@ -44,7 +45,8 @@
         "schema",
         "commit",
         "patch",
-        "transfer"
+        "transfer",
+        "transforms"
       ]
     },
     {
@@ -56,7 +58,8 @@
         "commit",
         "expire",
         "patch",
-        "transfer"
+        "transfer",
+        "transforms"
       ]
     },
     {
@@ -75,7 +78,8 @@
         "aggregate",
         "patch",
         "inspect",
-        "transfer"
+        "transfer",
+        "transforms"
       ]
     },
     {
@@ -225,6 +229,16 @@
       "owned_facts": "游标签名与数据库绑定",
       "consumers": [
         "query"
+      ]
+    },
+    {
+      "id": "transforms",
+      "path": "strataleaf/transforms.py",
+      "responsibility": "原子文档动作及物化语义",
+      "owned_facts": "数值递增、数组去重追加与成员删除动作",
+      "consumers": [
+        "transforms",
+        "commit"
       ]
     }
   ],
@@ -513,6 +527,28 @@
       "success": "外部文档流验证后整批导入",
       "failure": "重复键整体拒绝",
       "verification": "python3 -m examples.workflows transfer"
+    },
+    {
+      "id": "transform",
+      "name": "原子文档变换",
+      "entry": "Database.transform",
+      "module_ids": [
+        "transforms",
+        "patch",
+        "commit",
+        "snapshot",
+        "schema",
+        "index",
+        "storage"
+      ],
+      "steps": [
+        "输入校验与读取已有事实",
+        "原子文档动作及物化语义",
+        "形成可观察结果"
+      ],
+      "success": "动作在单提交边界内物化为最终文档且并发修改互不丢失",
+      "failure": "类型混淆、缺失字段或陈旧版本拒绝并整体回滚",
+      "verification": "python3 -m examples.workflows transform"
     }
   ],
   "complexity": {
